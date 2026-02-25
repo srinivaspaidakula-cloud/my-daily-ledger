@@ -1,0 +1,705 @@
+import { useState, useEffect, useCallback, useRef } from "react";
+import { db } from "./firebase";
+import { doc, getDoc, setDoc } from "firebase/firestore";
+
+const uid  = () => Math.random().toString(36).slice(2, 8);
+const num  = v  => parseFloat(v) || 0;
+const fmt  = v  => { const n = parseFloat(v); if (!n && n !== 0) return "—"; return "₹" + Math.abs(n).toLocaleString("en-IN"); };
+const today   = () => new Date().toISOString().split("T")[0];
+const prevDay = d  => { const dt = new Date(d); dt.setDate(dt.getDate() - 1); return dt.toISOString().split("T")[0]; };
+const dDisplay = s => { if (!s) return ""; const [y, m, d] = s.split("-"); return `${d}/${m}/${y}`; };
+
+const DENOMS = [500, 200, 100, 50, 20, 10];
+const mkDenomCounts = () => Object.fromEntries(DENOMS.map(d => [d, 0]));
+const mkAccount  = (name = "") => ({ id: uid(), name, open: "", close: "" });
+const mkExpense  = ()          => ({ id: uid(), name: "", amount: "" });
+const mkCredit   = ()          => ({ id: uid(), name: "", amount: "" });
+const mkVoucher  = ()          => ({ id: uid(), name: "", amount: "" });
+
+const defaultData = () => ({
+  accounts: [
+    mkAccount("KO"), mkAccount("SBI OD PS"), mkAccount("SBI SB PS"),
+    mkAccount("CA SBI"), mkAccount("INDIRA SBI"), mkAccount("BY CASH"),
+    mkAccount("COINS"), mkAccount("MPS"), mkAccount("ANJILE"),
+    mkAccount("PAY POINT"), mkAccount("MARCHANT"), mkAccount("PSR"),
+  ],
+  expenses:    [mkExpense()],
+  credits:     [mkCredit()],
+  vouchers:    [mkVoucher()],
+  denomCounts: mkDenomCounts(),
+  notes:       "",
+});
+
+// ── Firebase helpers ──────────────────────────────────────────────────────────
+const COLLECTION = "ledger";
+
+async function fbGet(date) {
+  try {
+    const snap = await getDoc(doc(db, COLLECTION, date));
+    if (snap.exists()) return snap.data();
+  } catch (e) { console.error("fbGet", e); }
+  return null;
+}
+
+async function fbSet(date, data) {
+  try {
+    await setDoc(doc(db, COLLECTION, date), data);
+    return true;
+  } catch (e) { console.error("fbSet", e); return false; }
+}
+
+// ── CSS ───────────────────────────────────────────────────────────────────────
+const CSS = `
+  @import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=JetBrains+Mono:wght@400;600;700&display=swap');
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html{scroll-behavior:smooth;}
+  ::selection{background:#f59e0b33;}
+  ::-webkit-scrollbar{width:4px;height:4px;}
+  ::-webkit-scrollbar-track{background:#060a12;}
+  ::-webkit-scrollbar-thumb{background:#1e293b;border-radius:4px;}
+  ::-webkit-scrollbar-thumb:hover{background:#f59e0b44;}
+  input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+  @keyframes shimmer{0%{background-position:200% center}100%{background-position:-200% center}}
+  .anim{animation:fadeIn 0.35s ease forwards;}
+  .pulse{animation:pulse 1.4s ease infinite;}
+  .glow-text{
+    background:linear-gradient(135deg,#f59e0b,#fcd34d,#f59e0b);
+    background-size:200% auto;-webkit-background-clip:text;-webkit-text-fill-color:transparent;
+    animation:shimmer 4s linear infinite;
+  }
+  body{
+    background:#060a12;
+    background-image:radial-gradient(ellipse at 20% 10%,rgba(245,158,11,0.06) 0%,transparent 60%),
+      radial-gradient(ellipse at 80% 90%,rgba(16,185,129,0.04) 0%,transparent 60%);
+    font-family:'JetBrains Mono',monospace;
+  }
+  .sc{
+    background:linear-gradient(160deg,#0d1525 0%,#080e1a 100%);
+    border:1px solid #1a2740;border-radius:14px;padding:20px 22px;margin-bottom:16px;
+    position:relative;overflow:hidden;
+  }
+  .sc::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;
+    background:linear-gradient(90deg,transparent,rgba(245,158,11,0.3),transparent);}
+  .st{font-family:'Syne',sans-serif;font-size:11px;font-weight:700;letter-spacing:0.18em;
+    text-transform:uppercase;color:#f59e0b;margin-bottom:14px;display:flex;align-items:center;gap:10px;}
+  .st::after{content:'';flex:1;height:1px;background:linear-gradient(90deg,#f59e0b22,transparent);}
+  table{width:100%;border-collapse:collapse;}
+  th{font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:0.12em;text-transform:uppercase;
+    color:#2a3a55;padding:7px 10px;font-weight:600;border-bottom:1px solid #1a2740;text-align:right;}
+  th.tl{text-align:left;}
+  td{padding:7px 10px;border-bottom:1px solid rgba(26,39,64,0.5);font-family:'JetBrains Mono',monospace;
+    font-size:12px;text-align:right;vertical-align:middle;}
+  td.tl{text-align:left;}
+  tr:hover td{background:rgba(245,158,11,0.02);}
+  .trow td{border-top:1px solid rgba(245,158,11,0.2);border-bottom:none;font-weight:700;
+    padding:9px 10px;background:rgba(245,158,11,0.04);}
+  .inp{background:rgba(255,255,255,0.025);border:1px solid rgba(26,39,64,0.9);border-radius:6px;
+    color:#e2e8f0;padding:6px 10px;font-family:'JetBrains Mono',monospace;font-size:12px;
+    width:100%;outline:none;transition:all 0.2s;}
+  .inp:focus{border-color:rgba(245,158,11,0.45)!important;box-shadow:0 0 0 2px rgba(245,158,11,0.07)!important;}
+  .inp:hover{border-color:#2a3a55;}
+  .inp-r{text-align:right;}.inp-l{text-align:left;}
+  .inp-ta{min-height:70px;resize:vertical;line-height:1.8;padding:10px 12px;}
+  .btn-add{margin-top:10px;background:transparent;border:1px solid #1a2740;border-radius:6px;
+    color:#3a4f6e;padding:5px 14px;font-size:10px;cursor:pointer;
+    font-family:'JetBrains Mono',monospace;letter-spacing:0.08em;transition:all 0.2s;}
+  .btn-add:hover{border-color:#f59e0b;color:#f59e0b;background:rgba(245,158,11,0.05);}
+  .btn-del{background:none;border:1px solid transparent;border-radius:4px;color:#2a3a55;
+    cursor:pointer;padding:3px 7px;font-size:12px;transition:all 0.2s;font-family:'JetBrains Mono',monospace;}
+  .btn-del:hover{color:#f43f5e;border-color:rgba(244,63,94,0.25);background:rgba(244,63,94,0.06);}
+  .btn-save{background:linear-gradient(135deg,#f59e0b,#fbbf24);color:#060a12;border:none;border-radius:8px;
+    padding:8px 22px;font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;cursor:pointer;
+    letter-spacing:0.08em;box-shadow:0 0 20px rgba(245,158,11,0.28);transition:all 0.2s;}
+  .btn-save:hover{box-shadow:0 0 30px rgba(245,158,11,0.48);transform:translateY(-1px);}
+  .btn-save:disabled{opacity:0.5;cursor:not-allowed;transform:none;}
+  .denom-btn{
+    background:linear-gradient(135deg,#0d1828,#0a1220);
+    border:1px solid #1a2740;border-radius:10px;
+    color:#cbd5e1;font-family:'JetBrains Mono',monospace;font-weight:700;
+    cursor:pointer;transition:all 0.18s;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:3px;padding:10px 6px;
+    position:relative;overflow:hidden;width:100%;
+  }
+  .denom-btn:hover{border-color:#f59e0b88;transform:translateY(-2px);box-shadow:0 6px 20px rgba(245,158,11,0.15);}
+  .denom-btn:active{transform:scale(0.95);}
+  .tab-btn{background:none;border:none;border-bottom:2px solid transparent;
+    font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.1em;
+    cursor:pointer;padding:10px 22px;transition:all 0.2s;color:#3a4f6e;}
+  .tab-btn:hover{color:#f59e0b!important;}
+  .sum-card{background:linear-gradient(135deg,#0c1220,#080e1a);border:1px solid #1a2740;
+    border-radius:12px;padding:15px 18px;position:relative;overflow:hidden;transition:all 0.2s;}
+  .sum-card:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,0.4);}
+  .sum-card::after{content:'';position:absolute;bottom:0;left:0;right:0;height:2px;}
+  .sc-g::after{background:linear-gradient(90deg,#10b981,transparent);}
+  .sc-r::after{background:linear-gradient(90deg,#f43f5e,transparent);}
+  .sc-y::after{background:linear-gradient(90deg,#f59e0b,transparent);}
+  .sc-b::after{background:linear-gradient(90deg,#38bdf8,transparent);}
+  .hist-btn{background:linear-gradient(135deg,#0c1220,#080e1a);border:1px solid #1a2740;
+    border-radius:10px;padding:11px;cursor:pointer;text-align:center;
+    font-family:'JetBrains Mono',monospace;font-size:12px;transition:all 0.2s;color:#3a4f6e;}
+  .hist-btn:hover{border-color:#f59e0b88;transform:translateY(-2px);}
+  .hist-btn.active{background:linear-gradient(135deg,rgba(245,158,11,0.12),rgba(245,158,11,0.04));
+    border-color:#f59e0b;color:#f59e0b;font-weight:700;}
+  .yd-row{display:flex;justify-content:space-between;align-items:center;
+    padding:7px 0;border-bottom:1px solid rgba(26,39,64,0.5);font-size:12px;}
+`;
+
+// ── App ───────────────────────────────────────────────────────────────────────
+export default function App() {
+  const [date,       setDate]       = useState(today());
+  const [data,       setData]       = useState(defaultData());
+  const [ydVouchers, setYdVouchers] = useState([]);
+  const [savedDates, setSavedDates] = useState([]);
+  const [msg,        setMsg]        = useState("");
+  const [tab,        setTab]        = useState("entry");
+  const [hDate,      setHDate]      = useState("");
+  const [hData,      setHData]      = useState(null);
+  const [loading,    setLoading]    = useState(false);
+  const [saving,     setSaving]     = useState(false);
+  const saveTimer = useRef(null);
+
+  // load date list from a known index doc
+  const loadDates = useCallback(async () => {
+    try {
+      const snap = await getDoc(doc(db, COLLECTION, "__index__"));
+      if (snap.exists()) setSavedDates((snap.data().dates || []).sort().reverse());
+    } catch {}
+  }, []);
+
+  const saveDateIndex = useCallback(async (d) => {
+    try {
+      const snap = await getDoc(doc(db, COLLECTION, "__index__"));
+      const existing = snap.exists() ? (snap.data().dates || []) : [];
+      if (!existing.includes(d)) {
+        await setDoc(doc(db, COLLECTION, "__index__"), { dates: [...existing, d] });
+      }
+    } catch {}
+  }, []);
+
+  const loadDate = useCallback(async (d) => {
+    setLoading(true);
+    try {
+      const raw = await fbGet(d);
+      const loaded = raw ? raw : defaultData();
+      if (!loaded.denomCounts) loaded.denomCounts = mkDenomCounts();
+      if (!loaded.credits)     loaded.credits     = [mkCredit()];
+      setData(loaded);
+    } catch { setData(defaultData()); }
+    // yesterday vouchers
+    try {
+      const yd  = prevDay(d);
+      const ydr = await fbGet(yd);
+      setYdVouchers(ydr ? (ydr.vouchers || []).filter(v => v.name || v.amount) : []);
+    } catch { setYdVouchers([]); }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { loadDates(); }, [loadDates]);
+  useEffect(() => { loadDate(date); }, [date, loadDate]);
+
+  // auto-save debounce
+  useEffect(() => {
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      if (date) {
+        await fbSet(date, data);
+        await saveDateIndex(date);
+        setSavedDates(prev => prev.includes(date) ? prev : [date, ...prev].sort().reverse());
+      }
+    }, 2000);
+    return () => clearTimeout(saveTimer.current);
+  }, [data, date, saveDateIndex]);
+
+  const save = async () => {
+    setSaving(true);
+    const ok = await fbSet(date, data);
+    await saveDateIndex(date);
+    setSavedDates(prev => prev.includes(date) ? prev : [date, ...prev].sort().reverse());
+    setMsg(ok ? "✦ Saved!" : "✗ Failed");
+    setSaving(false);
+    setTimeout(() => setMsg(""), 2500);
+  };
+
+  const updAcc  = (id, f, v) => setData(p => ({ ...p, accounts: p.accounts.map(a => a.id === id ? { ...a, [f]: v } : a) }));
+  const addAcc  = ()         => setData(p => ({ ...p, accounts: [...p.accounts, mkAccount()] }));
+  const delAcc  = id         => setData(p => ({ ...p, accounts: p.accounts.filter(a => a.id !== id) }));
+  const updList = (k, id, f, v) => setData(p => ({ ...p, [k]: p[k].map(i => i.id === id ? { ...i, [f]: v } : i) }));
+  const addItem = (k, fn)    => setData(p => ({ ...p, [k]: [...p[k], fn()] }));
+  const delItem = (k, id)    => setData(p => ({ ...p, [k]: p[k].filter(i => i.id !== id) }));
+  const addDenom = (d, n = 1) => setData(p => ({ ...p, denomCounts: { ...p.denomCounts, [d]: Math.max(0, (p.denomCounts[d] || 0) + n) } }));
+  const setDenom = (d, v)     => setData(p => ({ ...p, denomCounts: { ...p.denomCounts, [d]: Math.max(0, parseInt(v) || 0) } }));
+
+  const cashTotal  = DENOMS.reduce((s, d) => s + (data.denomCounts[d] || 0) * d, 0);
+  const totalOpen  = data.accounts.reduce((s, a) => s + num(a.open),   0);
+  const totalClose = data.accounts.reduce((s, a) => s + num(a.close),  0);
+  const totalExp   = data.expenses.reduce((s, e) => s + num(e.amount), 0);
+  const totalCred  = data.credits.reduce( (s, c) => s + num(c.amount), 0);
+  const totalVch   = data.vouchers.reduce((s, v) => s + num(v.amount), 0);
+  const totalYdVch = ydVouchers.reduce(  (s, v) => s + num(v.amount), 0);
+  const netGrowth  = totalClose - totalOpen;
+
+  const viewHistory = async (d) => {
+    try {
+      const raw = await fbGet(d);
+      if (raw) { setHData(raw); setHDate(d); setTab("history"); }
+    } catch {}
+  };
+
+  return (
+    <div style={{ fontFamily: "'JetBrains Mono',monospace", background: "#060a12", minHeight: "100vh", color: "#e2e8f0" }}>
+      <style>{CSS}</style>
+
+      {/* HEADER */}
+      <header style={{ background: "rgba(6,10,18,0.97)", backdropFilter: "blur(16px)", borderBottom: "1px solid #1a2740", position: "sticky", top: 0, zIndex: 100 }}>
+        <div style={{ maxWidth: 1600, margin: "0 auto", padding: "0 28px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", height: 62 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ width: 38, height: 38, borderRadius: 10, background: "linear-gradient(135deg,#f59e0b,#fbbf24)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 19, fontWeight: 800, color: "#060a12", boxShadow: "0 0 22px rgba(245,158,11,0.4)" }}>₹</div>
+              <div>
+                <div style={{ fontFamily: "'Syne',sans-serif", fontSize: 20, fontWeight: 800 }} className="glow-text">DailyLedger</div>
+                <div style={{ fontSize: 8, color: "#2a3a55", letterSpacing: "0.2em", textTransform: "uppercase" }}>Business Transaction Tracker</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#0c1220", border: "1px solid #1a2740", borderRadius: 8, padding: "6px 14px" }}>
+                <span style={{ fontSize: 9, color: "#2a3a55", letterSpacing: "0.12em", textTransform: "uppercase" }}>Date</span>
+                <input type="date" value={date} onChange={e => { setDate(e.target.value); setTab("entry"); setHData(null); }}
+                  style={{ background: "transparent", border: "none", color: "#f59e0b", fontFamily: "'JetBrains Mono',monospace", fontSize: 13, outline: "none", cursor: "pointer" }} />
+              </div>
+              {msg && <span style={{ fontSize: 11, color: "#10b981", fontWeight: 700 }} className="pulse">{msg}</span>}
+              <button className="btn-save" onClick={save} disabled={saving}>{saving ? "Saving…" : "💾 SAVE"}</button>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 0, borderTop: "1px solid #0c1525" }}>
+            {[["entry", "📝 Entry"], ["history", `📅 History${savedDates.length > 0 ? ` (${savedDates.length})` : ""}`]].map(([t, l]) => (
+              <button key={t} className="tab-btn" onClick={() => setTab(t)}
+                style={{ borderBottom: `2px solid ${tab === t ? "#f59e0b" : "transparent"}`, color: tab === t ? "#f59e0b" : "#3a4f6e", fontWeight: tab === t ? 700 : 400 }}>{l}</button>
+            ))}
+          </div>
+        </div>
+      </header>
+
+      {/* ENTRY TAB */}
+      {tab === "entry" && !loading && (
+        <div style={{ maxWidth: 1600, margin: "0 auto", padding: "22px 28px" }} className="anim">
+
+          {/* SUMMARY CARDS */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 10, marginBottom: 20 }}>
+            {[
+              { l: "Date",         v: dDisplay(date),   cls: "sc-y", color: "#f59e0b",  icon: "📅" },
+              { l: "Net Growth",   v: `${netGrowth >= 0 ? "+" : "−"}₹${Math.abs(netGrowth).toLocaleString("en-IN")}`, cls: netGrowth >= 0 ? "sc-g" : "sc-r", color: netGrowth >= 0 ? "#10b981" : "#f43f5e", icon: "📈" },
+              { l: "Cash in Hand", v: fmt(cashTotal),   cls: "sc-y", color: "#fbbf24",  icon: "💵" },
+              { l: "Credits",      v: fmt(totalCred),   cls: "sc-g", color: "#10b981",  icon: "💚" },
+              { l: "Expenses",     v: fmt(totalExp),    cls: "sc-r", color: "#f43f5e",  icon: "💸" },
+              { l: "Vouchers",     v: fmt(totalVch),    cls: "sc-b", color: "#38bdf8",  icon: "🧾" },
+            ].map(({ l, v, cls, color, icon }) => (
+              <div key={l} className={`sum-card ${cls}`}>
+                <div style={{ fontSize: 9, color: "#3a4f6e", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 7, display: "flex", alignItems: "center", gap: 5 }}>
+                  <span>{icon}</span><span>{l}</span>
+                </div>
+                <div style={{ fontFamily: "'Syne',sans-serif", fontSize: l === "Date" ? 13 : 19, fontWeight: 800, color, lineHeight: 1 }}>{v}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* MAIN GRID */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 370px", gap: 18, alignItems: "start" }}>
+
+            {/* LEFT COLUMN */}
+            <div>
+              {/* ACCOUNTS */}
+              <div className="sc">
+                <div className="st">⬛ Accounts</div>
+                <div style={{ overflowX: "auto" }}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th className="tl" style={{ minWidth: 140 }}>Account</th>
+                        <th style={{ minWidth: 120 }}>Opening ₹</th>
+                        <th style={{ minWidth: 120 }}>Closing ₹</th>
+                        <th style={{ minWidth: 110 }}>Diff</th>
+                        <th style={{ width: 36 }}></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.accounts.map(a => {
+                        const d = num(a.close) - num(a.open); const has = a.open || a.close;
+                        return (
+                          <tr key={a.id}>
+                            <td className="tl"><input className="inp inp-l" value={a.name} onChange={e => updAcc(a.id, "name", e.target.value)} placeholder="Account name…" /></td>
+                            <td><input className="inp inp-r" type="number" value={a.open}  onChange={e => updAcc(a.id, "open",  e.target.value)} placeholder="0" style={{ color: "#a78bfa" }} /></td>
+                            <td><input className="inp inp-r" type="number" value={a.close} onChange={e => updAcc(a.id, "close", e.target.value)} placeholder="0" style={{ color: "#38bdf8" }} /></td>
+                            <td style={{ fontWeight: 700, color: has ? (d > 0 ? "#10b981" : d < 0 ? "#f43f5e" : "#3a4f6e") : "#1a2740" }}>
+                              {has ? `${d >= 0 ? "+" : "−"}₹${Math.abs(d).toLocaleString("en-IN")}` : "—"}
+                            </td>
+                            <td><button className="btn-del" onClick={() => delAcc(a.id)}>✕</button></td>
+                          </tr>
+                        );
+                      })}
+                      <tr className="trow">
+                        <td className="tl" style={{ color: "#f59e0b", fontFamily: "'Syne',sans-serif", fontSize: 10, letterSpacing: "0.1em" }}>TOTALS</td>
+                        <td style={{ color: "#a78bfa" }}>₹{totalOpen.toLocaleString("en-IN")}</td>
+                        <td style={{ color: "#38bdf8" }}>₹{totalClose.toLocaleString("en-IN")}</td>
+                        <td style={{ color: netGrowth >= 0 ? "#10b981" : "#f43f5e" }}>{netGrowth >= 0 ? "+" : "−"}₹{Math.abs(netGrowth).toLocaleString("en-IN")}</td>
+                        <td></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <button className="btn-add" onClick={addAcc}>＋ Add Account</button>
+              </div>
+
+              {/* CASH COUNTER */}
+              <div className="sc" style={{ background: "linear-gradient(160deg,#0e1a10,#080e1a)" }}>
+                <div className="st" style={{ color: "#fbbf24" }}>💵 Cash Counter</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 8, marginBottom: 16 }}>
+                  {DENOMS.map(d => (
+                    <div key={d} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                      <button className="denom-btn" onClick={() => addDenom(d)}>
+                        <span style={{ fontSize: 15, fontWeight: 800, color: "#fbbf24", fontFamily: "'Syne',sans-serif" }}>₹{d}</span>
+                        <span style={{ fontSize: 8, color: "#3a4f6e", letterSpacing: "0.08em" }}>TAP +1</span>
+                      </button>
+                      <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+                        <button onClick={() => addDenom(d, -1)} style={{ background: "#0a1220", border: "1px solid #1a2740", borderRadius: 5, color: "#f43f5e", cursor: "pointer", width: 22, height: 22, fontSize: 14, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>−</button>
+                        <input className="inp inp-r" type="number" value={data.denomCounts[d] || 0} onChange={e => setDenom(d, e.target.value)}
+                          style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", textAlign: "center", padding: "3px 4px" }} />
+                        <button onClick={() => addDenom(d, 1)}  style={{ background: "#0a1220", border: "1px solid #1a2740", borderRadius: 5, color: "#10b981", cursor: "pointer", width: 22, height: 22, fontSize: 14, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>+</button>
+                      </div>
+                      <div style={{ textAlign: "center", fontSize: 10, color: "#3a4f6e" }}>
+                        = <span style={{ color: "#fbbf24", fontWeight: 700 }}>₹{((data.denomCounts[d] || 0) * d).toLocaleString("en-IN")}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ background: "linear-gradient(135deg,rgba(251,191,36,0.12),rgba(251,191,36,0.04))", border: "1px solid rgba(251,191,36,0.25)", borderRadius: 10, padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <div style={{ fontSize: 9, color: "#8a6a20", letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: 3 }}>Total Cash in Hand</div>
+                    <div style={{ fontSize: 9, color: "#3a4f6e" }}>
+                      {DENOMS.filter(d => data.denomCounts[d] > 0).map(d => `${data.denomCounts[d]}×₹${d}`).join("  +  ") || "No notes counted yet"}
+                    </div>
+                  </div>
+                  <div style={{ fontFamily: "'Syne',sans-serif", fontSize: 28, fontWeight: 800, color: "#fbbf24" }}>₹{cashTotal.toLocaleString("en-IN")}</div>
+                </div>
+                <button onClick={() => setData(p => ({ ...p, denomCounts: mkDenomCounts() }))}
+                  style={{ marginTop: 8, background: "transparent", border: "1px solid #1a2740", borderRadius: 6, color: "#f43f5e55", fontSize: 10, padding: "4px 12px", cursor: "pointer", fontFamily: "'JetBrains Mono',monospace", transition: "all 0.2s" }}
+                  onMouseOver={e => { e.target.style.borderColor = "#f43f5e"; e.target.style.color = "#f43f5e"; }}
+                  onMouseOut={e  => { e.target.style.borderColor = "#1a2740"; e.target.style.color = "#f43f5e55"; }}>
+                  🔄 Reset Cash
+                </button>
+              </div>
+
+              {/* EXPENSES */}
+              <div className="sc">
+                <div className="st">💸 Expenses</div>
+                <table>
+                  <thead><tr><th className="tl">Description</th><th style={{ minWidth: 130 }}>Amount ₹</th><th style={{ width: 36 }}></th></tr></thead>
+                  <tbody>
+                    {data.expenses.map(e => (
+                      <tr key={e.id}>
+                        <td className="tl"><input className="inp inp-l" value={e.name} onChange={v => updList("expenses", e.id, "name", v.target.value)} placeholder="e.g. Petrol, Rent, Phone bill…" /></td>
+                        <td><input className="inp inp-r" type="number" value={e.amount} onChange={v => updList("expenses", e.id, "amount", v.target.value)} placeholder="0" style={{ color: "#fca5a5" }} /></td>
+                        <td><button className="btn-del" onClick={() => delItem("expenses", e.id)}>✕</button></td>
+                      </tr>
+                    ))}
+                    <tr className="trow">
+                      <td className="tl" style={{ color: "#f59e0b", fontSize: 10, letterSpacing: "0.1em" }}>TOTAL</td>
+                      <td style={{ color: "#f43f5e" }}>₹{totalExp.toLocaleString("en-IN")}</td>
+                      <td></td>
+                    </tr>
+                  </tbody>
+                </table>
+                <button className="btn-add" onClick={() => addItem("expenses", mkExpense)}>＋ Add Expense</button>
+              </div>
+
+              {/* CREDITS */}
+              <div className="sc" style={{ background: "linear-gradient(160deg,#071812,#060a12)" }}>
+                <div className="st" style={{ color: "#10b981" }}>💚 Credits Received</div>
+                <table>
+                  <thead><tr><th className="tl">From / Description</th><th style={{ minWidth: 130 }}>Amount ₹</th><th style={{ width: 36 }}></th></tr></thead>
+                  <tbody>
+                    {data.credits.map(c => (
+                      <tr key={c.id}>
+                        <td className="tl"><input className="inp inp-l" value={c.name} onChange={v => updList("credits", c.id, "name", v.target.value)} placeholder="Customer / payment source…" /></td>
+                        <td><input className="inp inp-r" type="number" value={c.amount} onChange={v => updList("credits", c.id, "amount", v.target.value)} placeholder="0" style={{ color: "#86efac" }} /></td>
+                        <td><button className="btn-del" onClick={() => delItem("credits", c.id)}>✕</button></td>
+                      </tr>
+                    ))}
+                    <tr className="trow">
+                      <td className="tl" style={{ color: "#10b981", fontSize: 10, letterSpacing: "0.1em" }}>TOTAL</td>
+                      <td style={{ color: "#10b981" }}>₹{totalCred.toLocaleString("en-IN")}</td>
+                      <td></td>
+                    </tr>
+                  </tbody>
+                </table>
+                <button className="btn-add" onClick={() => addItem("credits", mkCredit)}>＋ Add Credit</button>
+              </div>
+            </div>
+
+            {/* RIGHT SIDEBAR */}
+            <div>
+              {/* YESTERDAY VOUCHERS */}
+              {ydVouchers.length > 0 ? (
+                <div className="sc" style={{ background: "linear-gradient(160deg,#0a1420,#07101c)", border: "1px solid #1a3050" }}>
+                  <div className="st" style={{ color: "#38bdf8", fontSize: 10 }}>
+                    🕐 Yesterday's Vouchers
+                    <span style={{ marginLeft: "auto", fontSize: 9, color: "#2a4060", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>{dDisplay(prevDay(date))}</span>
+                  </div>
+                  {ydVouchers.map((v, i) => (
+                    <div key={v.id || i} className="yd-row">
+                      <span style={{ color: "#64748b", fontSize: 12, flex: 1 }}>{v.name || "—"}</span>
+                      <span style={{ color: "#38bdf8", fontWeight: 700, fontSize: 12, marginLeft: 12 }}>₹{num(v.amount).toLocaleString("en-IN")}</span>
+                    </div>
+                  ))}
+                  <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 10, marginTop: 4, borderTop: "1px solid rgba(56,189,248,0.15)", fontSize: 12 }}>
+                    <span style={{ color: "#2a4060", fontSize: 10, letterSpacing: "0.1em" }}>YESTERDAY TOTAL</span>
+                    <span style={{ color: "#38bdf8", fontWeight: 700 }}>₹{totalYdVch.toLocaleString("en-IN")}</span>
+                  </div>
+                  <div style={{ marginTop: 10, padding: "7px 10px", background: "rgba(56,189,248,0.05)", borderRadius: 6, fontSize: 10, color: "#2a4060", lineHeight: 1.7 }}>
+                    ℹ️ Check if these have cleared before adding today's vouchers.
+                  </div>
+                </div>
+              ) : (
+                <div className="sc" style={{ background: "linear-gradient(160deg,#0a1420,#07101c)", border: "1px dashed #1a2740", textAlign: "center", padding: "22px" }}>
+                  <div style={{ fontSize: 22, marginBottom: 6 }}>📭</div>
+                  <div style={{ fontSize: 10, color: "#2a4060", lineHeight: 1.7 }}>No vouchers from<br />{dDisplay(prevDay(date))}</div>
+                </div>
+              )}
+
+              {/* TODAY VOUCHERS */}
+              <div className="sc">
+                <div className="st">🧾 Today's Vouchers</div>
+                <table>
+                  <thead><tr><th className="tl">Name / Description</th><th style={{ minWidth: 110 }}>Amount ₹</th><th style={{ width: 36 }}></th></tr></thead>
+                  <tbody>
+                    {data.vouchers.map(v => (
+                      <tr key={v.id}>
+                        <td className="tl"><input className="inp inp-l" value={v.name} onChange={e => updList("vouchers", v.id, "name", e.target.value)} placeholder="e.g. OD Debit, Indhu…" /></td>
+                        <td><input className="inp inp-r" type="number" value={v.amount} onChange={e => updList("vouchers", v.id, "amount", e.target.value)} placeholder="0" style={{ color: "#7dd3fc" }} /></td>
+                        <td><button className="btn-del" onClick={() => delItem("vouchers", v.id)}>✕</button></td>
+                      </tr>
+                    ))}
+                    <tr className="trow">
+                      <td className="tl" style={{ color: "#f59e0b", fontSize: 10, letterSpacing: "0.1em" }}>TOTAL</td>
+                      <td style={{ color: "#38bdf8" }}>₹{totalVch.toLocaleString("en-IN")}</td>
+                      <td></td>
+                    </tr>
+                  </tbody>
+                </table>
+                <button className="btn-add" onClick={() => addItem("vouchers", mkVoucher)}>＋ Add Voucher</button>
+              </div>
+
+              {/* DAY SUMMARY */}
+              <div className="sc" style={{ background: "linear-gradient(160deg,#071812,#060a12)" }}>
+                <div className="st" style={{ color: "#10b981" }}>📊 Day Summary</div>
+                {[
+                  { l: "Opening Total", v: `₹${totalOpen.toLocaleString("en-IN")}`,  c: "#a78bfa" },
+                  { l: "Closing Total", v: `₹${totalClose.toLocaleString("en-IN")}`, c: "#38bdf8" },
+                  { l: "Credits In",    v: `₹${totalCred.toLocaleString("en-IN")}`,  c: "#10b981" },
+                  { l: "Cash in Hand",  v: `₹${cashTotal.toLocaleString("en-IN")}`,  c: "#fbbf24" },
+                  { l: "Expenses",      v: `₹${totalExp.toLocaleString("en-IN")}`,   c: "#f43f5e" },
+                  { l: "Vouchers",      v: `₹${totalVch.toLocaleString("en-IN")}`,   c: "#38bdf8" },
+                ].map(({ l, v, c }) => (
+                  <div key={l} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px solid rgba(26,39,64,0.4)" }}>
+                    <span style={{ color: "#3a4f6e", fontSize: 11 }}>{l}</span>
+                    <span style={{ color: c, fontWeight: 700, fontSize: 12 }}>{v}</span>
+                  </div>
+                ))}
+                <div style={{
+                  marginTop: 14, borderRadius: 10, padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center",
+                  background: netGrowth >= 0 ? "linear-gradient(135deg,rgba(16,185,129,0.1),rgba(16,185,129,0.03))" : "linear-gradient(135deg,rgba(244,63,94,0.1),rgba(244,63,94,0.03))",
+                  border: `1px solid ${netGrowth >= 0 ? "rgba(16,185,129,0.2)" : "rgba(244,63,94,0.2)"}`,
+                }}>
+                  <div>
+                    <div style={{ fontSize: 9, letterSpacing: "0.14em", textTransform: "uppercase", color: netGrowth >= 0 ? "#10b981" : "#f43f5e", marginBottom: 3 }}>Growth Today</div>
+                    <div style={{ fontSize: 9, color: "#2a3a55" }}>Closing − Opening</div>
+                  </div>
+                  <div style={{ fontFamily: "'Syne',sans-serif", fontSize: 24, fontWeight: 800, color: netGrowth >= 0 ? "#10b981" : "#f43f5e" }}>
+                    {netGrowth >= 0 ? "▲" : "▼"} ₹{Math.abs(netGrowth).toLocaleString("en-IN")}
+                  </div>
+                </div>
+              </div>
+
+              {/* NOTES */}
+              <div className="sc">
+                <div className="st">📝 Notes</div>
+                <textarea className="inp inp-ta" value={data.notes}
+                  onChange={e => setData(p => ({ ...p, notes: e.target.value }))}
+                  placeholder="Pending tasks, reminders, follow-ups for tomorrow…" />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* HISTORY TAB */}
+      {tab === "history" && (
+        <div style={{ maxWidth: 1600, margin: "0 auto", padding: "22px 28px" }} className="anim">
+          {savedDates.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "80px", color: "#2a3a55" }}>
+              <div style={{ fontSize: 56, marginBottom: 12 }}>📭</div>
+              <div style={{ fontFamily: "'Syne',sans-serif", fontSize: 18, color: "#3a4f6e" }}>No records yet</div>
+            </div>
+          ) : (
+            <>
+              <div className="st" style={{ fontSize: 12, marginBottom: 14 }}>Select a Date</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(130px,1fr))", gap: 8, marginBottom: 22 }}>
+                {savedDates.map(d => (
+                  <button key={d} className={`hist-btn${d === hDate ? " active" : ""}`} onClick={() => viewHistory(d)}
+                    style={{ color: d === hDate ? "#f59e0b" : "#3a4f6e" }}>{dDisplay(d)}</button>
+                ))}
+              </div>
+              {hData && <HistoryView data={hData} date={hDate} />}
+              {!hData && <div style={{ textAlign: "center", color: "#2a3a55", fontSize: 12, padding: 28 }}>← Select a date to view records</div>}
+            </>
+          )}
+        </div>
+      )}
+
+      {loading && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(6,10,18,0.92)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 999, backdropFilter: "blur(4px)" }}>
+          <div style={{ color: "#f59e0b", fontFamily: "'Syne',sans-serif", fontSize: 14, letterSpacing: "0.1em" }} className="pulse">Loading…</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── History View ──────────────────────────────────────────────────────────────
+function HistoryView({ data, date }) {
+  const dDisplay = s => { if (!s) return ""; const [y, m, d] = s.split("-"); return `${d}/${m}/${y}`; };
+  const fmt = v  => { const n = parseFloat(v); if (!n && n !== 0) return "—"; return "₹" + Math.abs(n).toLocaleString("en-IN"); };
+  const num = v  => parseFloat(v) || 0;
+  const DENOMS = [500, 200, 100, 50, 20, 10];
+  const totalOpen  = data.accounts?.reduce((s, a) => s + num(a.open),   0) || 0;
+  const totalClose = data.accounts?.reduce((s, a) => s + num(a.close),  0) || 0;
+  const totalExp   = data.expenses?.reduce((s, e) => s + num(e.amount), 0) || 0;
+  const totalCred  = data.credits?.reduce( (s, c) => s + num(c.amount), 0) || 0;
+  const totalVch   = data.vouchers?.reduce((s, v) => s + num(v.amount), 0) || 0;
+  const cashTotal  = DENOMS.reduce((s, d) => s + (data.denomCounts?.[d] || 0) * d, 0);
+  const growth     = totalClose - totalOpen;
+
+  return (
+    <div className="anim">
+      <div style={{ fontFamily: "'Syne',sans-serif", fontSize: 19, fontWeight: 800, color: "#f59e0b", marginBottom: 16 }}>Records — {dDisplay(date)}</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 10, marginBottom: 16 }}>
+        {[
+          { l: "Growth",       v: `${growth >= 0 ? "+" : "−"}₹${Math.abs(growth).toLocaleString("en-IN")}`, c: growth >= 0 ? "#10b981" : "#f43f5e" },
+          { l: "Credits",      v: fmt(totalCred),  c: "#10b981" },
+          { l: "Cash in Hand", v: fmt(cashTotal),  c: "#fbbf24" },
+          { l: "Expenses",     v: fmt(totalExp),   c: "#f43f5e" },
+          { l: "Vouchers",     v: fmt(totalVch),   c: "#38bdf8" },
+        ].map(({ l, v, c }) => (
+          <div key={l} style={{ background: "#0c1220", border: "1px solid #1a2740", borderRadius: 10, padding: "13px 16px" }}>
+            <div style={{ fontSize: 9, color: "#3a4f6e", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 5 }}>{l}</div>
+            <div style={{ fontFamily: "'Syne',sans-serif", fontSize: 17, fontWeight: 800, color: c }}>{v}</div>
+          </div>
+        ))}
+      </div>
+
+      {data.accounts?.length > 0 && (
+        <div className="sc" style={{ marginBottom: 12 }}>
+          <div className="st">⬛ Accounts</div>
+          <div style={{ overflowX: "auto" }}>
+            <table>
+              <thead><tr><th className="tl">Account</th><th>Opening</th><th>Closing</th><th>Diff</th></tr></thead>
+              <tbody>
+                {data.accounts.map((a, i) => {
+                  const d = num(a.close) - num(a.open); const has = a.open || a.close;
+                  return (
+                    <tr key={a.id || i}>
+                      <td className="tl" style={{ color: "#cbd5e1", fontWeight: 600 }}>{a.name || "—"}</td>
+                      <td style={{ color: "#a78bfa" }}>{a.open  ? fmt(a.open)  : "—"}</td>
+                      <td style={{ color: "#38bdf8" }}>{a.close ? fmt(a.close) : "—"}</td>
+                      <td style={{ fontWeight: 700, color: has ? (d > 0 ? "#10b981" : d < 0 ? "#f43f5e" : "#3a4f6e") : "#1a2740" }}>
+                        {has ? `${d >= 0 ? "+" : "−"}₹${Math.abs(d).toLocaleString("en-IN")}` : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+                <tr className="trow">
+                  <td className="tl" style={{ color: "#f59e0b", fontSize: 10 }}>TOTALS</td>
+                  <td style={{ color: "#a78bfa" }}>₹{totalOpen.toLocaleString("en-IN")}</td>
+                  <td style={{ color: "#38bdf8" }}>₹{totalClose.toLocaleString("en-IN")}</td>
+                  <td style={{ color: growth >= 0 ? "#10b981" : "#f43f5e" }}>{growth >= 0 ? "+" : "−"}₹{Math.abs(growth).toLocaleString("en-IN")}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {data.denomCounts && DENOMS.some(d => data.denomCounts[d] > 0) && (
+        <div className="sc" style={{ marginBottom: 12 }}>
+          <div className="st" style={{ color: "#fbbf24" }}>💵 Cash Breakdown</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+            {DENOMS.filter(d => data.denomCounts[d] > 0).map(d => (
+              <div key={d} style={{ background: "#0a1220", border: "1px solid #1a2740", borderRadius: 8, padding: "8px 14px", textAlign: "center" }}>
+                <div style={{ color: "#fbbf24", fontWeight: 700, fontSize: 14 }}>₹{d}</div>
+                <div style={{ color: "#3a4f6e", fontSize: 10 }}>× {data.denomCounts[d]}</div>
+                <div style={{ color: "#fbbf24", fontSize: 11, marginTop: 2 }}>= ₹{(data.denomCounts[d] * d).toLocaleString("en-IN")}</div>
+              </div>
+            ))}
+            <div style={{ background: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.2)", borderRadius: 8, padding: "8px 14px", textAlign: "center", display: "flex", flexDirection: "column", justifyContent: "center" }}>
+              <div style={{ color: "#8a6a20", fontSize: 9, letterSpacing: "0.1em" }}>TOTAL</div>
+              <div style={{ color: "#fbbf24", fontWeight: 800, fontFamily: "'Syne',sans-serif", fontSize: 18 }}>₹{cashTotal.toLocaleString("en-IN")}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+        {data.expenses?.filter(e => e.name || e.amount).length > 0 && (
+          <div className="sc">
+            <div className="st" style={{ fontSize: 9 }}>💸 Expenses</div>
+            {data.expenses.filter(e => e.name || e.amount).map((e, i) => (
+              <div key={e.id || i} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: "1px solid #0d1a2e", fontSize: 12 }}>
+                <span style={{ color: "#94a3b8" }}>{e.name || "—"}</span>
+                <span style={{ color: "#f43f5e", fontWeight: 700 }}>{fmt(e.amount)}</span>
+              </div>
+            ))}
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 7, paddingTop: 7, borderTop: "1px solid rgba(245,158,11,0.15)", fontWeight: 700, fontSize: 12 }}>
+              <span style={{ color: "#f59e0b" }}>Total</span><span style={{ color: "#f43f5e" }}>{fmt(totalExp)}</span>
+            </div>
+          </div>
+        )}
+        {data.credits?.filter(c => c.name || c.amount).length > 0 && (
+          <div className="sc">
+            <div className="st" style={{ fontSize: 9, color: "#10b981" }}>💚 Credits</div>
+            {data.credits.filter(c => c.name || c.amount).map((c, i) => (
+              <div key={c.id || i} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: "1px solid #0d1a2e", fontSize: 12 }}>
+                <span style={{ color: "#94a3b8" }}>{c.name || "—"}</span>
+                <span style={{ color: "#10b981", fontWeight: 700 }}>{fmt(c.amount)}</span>
+              </div>
+            ))}
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 7, paddingTop: 7, borderTop: "1px solid rgba(16,185,129,0.15)", fontWeight: 700, fontSize: 12 }}>
+              <span style={{ color: "#10b981" }}>Total</span><span style={{ color: "#10b981" }}>{fmt(totalCred)}</span>
+            </div>
+          </div>
+        )}
+        {data.vouchers?.filter(v => v.name || v.amount).length > 0 && (
+          <div className="sc">
+            <div className="st" style={{ fontSize: 9 }}>🧾 Vouchers</div>
+            {data.vouchers.filter(v => v.name || v.amount).map((v, i) => (
+              <div key={v.id || i} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderBottom: "1px solid #0d1a2e", fontSize: 12 }}>
+                <span style={{ color: "#94a3b8" }}>{v.name || "—"}</span>
+                <span style={{ color: "#38bdf8", fontWeight: 700 }}>{fmt(v.amount)}</span>
+              </div>
+            ))}
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 7, paddingTop: 7, borderTop: "1px solid rgba(56,189,248,0.15)", fontWeight: 700, fontSize: 12 }}>
+              <span style={{ color: "#f59e0b" }}>Total</span><span style={{ color: "#38bdf8" }}>{fmt(totalVch)}</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {data.notes && (
+        <div className="sc" style={{ marginTop: 12 }}>
+          <div className="st" style={{ fontSize: 9 }}>📝 Notes</div>
+          <p style={{ fontSize: 13, color: "#64748b", lineHeight: 1.8 }}>{data.notes}</p>
+        </div>
+      )}
+    </div>
+  );
+}
