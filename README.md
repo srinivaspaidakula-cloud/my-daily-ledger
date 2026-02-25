@@ -1,0 +1,2 @@
+# my-daily-ledger
+daily
